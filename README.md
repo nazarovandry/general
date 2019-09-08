@@ -3,5 +3,5 @@
 * game.go - игра на Go (техносфера 1-е задание)
 * pole.cpp - программа для ВКР (дипломной работы), проверяющая формулы
 * site_copy.go - версия [сайта](https://elmacards.herokuapp.com/) (файл main.go [отсюда](https://github.com/nazarovandry/all); [бот](https://github.com/nazarovandry/all_helpbot) для поддержки сайта)
-* ska1.go - [генератор текста](https://github.com/nazarovandry/textgenerator) (недоделано)
-* game.go - [3D игра](https://github.com/nazarovandry/3dgame) (недоделано)
+* ska1.go - [генератор текста](https://github.com/nazarovandry/textgenerator) (сделана основная часть)
+* game.go - [3D игра] (недоделано)
