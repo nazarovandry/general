@@ -1,76 +1,71 @@
 package main
 
 import (
-	"flag"
 	"image"
 	"image/color"
 	_ "image/png"
-    "math"
+	"math"
 	"time"
-    "os"
-    "fmt"
-    "log"
-    "strconv"
-    "strings"
-    "io/ioutil"
+	"os"
+	"fmt"
+	"log"
+	"strconv"
+	"sync"
 
 	"github.com/faiface/pixel"
 	"github.com/faiface/pixel/pixelgl"
 )
 
 const (
-    appleBonusForm int = iota
-    livesBonusForm
-    energyBonusForm
+	appleSprite int = iota
+	livesSprite
+	energySprite
+	zombieSprite
+	momoSprite
 )
 
 const (
-    energyBlock int = -1
+	MON int = iota
+	BON
+	BUL
 )
 
 const (
-    emptyBlock int = iota
-    wall0Block
-    wall1Block
-    wall2Block
-    wall3Block
-    wall4Block
-    wall5Block
-    startBlock
-    finishBlock
-    appleBlock
-    livesBlock
-    mon0Block
-    mon1Block
+	energyBlock int = -1
+	G               = 20.0 // although its 9.81
+	myHeightStart   = 0.5
+	GROUND          = -1
+	CEILING         = -3
 )
 
 const (
-    dDir int = iota
-    centerDir
+	emptyBlock int = iota
+	wall0Block
+	wall1Block
+	wall2Block
+	wall3Block
+	wall4Block
+	wall5Block
 )
 
 const (
-    menuCase int = iota
-    pauseCase
-    gameCase
-    screamCase
-    editorCase
+	dDir int = iota
+	centerDir
 )
 
 const (
-    emptySq int = iota
-    wallSq
-    iSq
-    energySq
-    exitSq
-    bonusSq
-    woodSq
-    mon1Sq
-    mon2Sq
+	menuCase int = iota
+	pauseCase
+	gameCase
+	screamCase
+	editorCase
+	levelChoosingCase
 )
 
 const (
-    maxLevSide  = 150
+	maxLevSide  = 150
+	maxLevHeight = 10
+	MAX = 500.0
 )
 
 var (
@@ -79,154 +74,362 @@ var (
 	width           = 320
 	height          = 200
 	scale           = 3.0
-    wallsAmount     = 10
-    maxLight        = 4.0
-    forceLight      = 1.0
-    mode            = menuCase
-    energy          = 100
-    energyUnit      = 0.1
-    yesLight        = true
-    levNow          = 0
-    bonusCount      = 0
-    livesStart      = 3
-    die             = false
-    appleEffect     = 1.0
-    livesEffect     = 1.0
-    mySpeed         = 3.0
-    myWallDist      = 0.4
+	maxLight        = 4.0
+	forceLight      = 1.0
+	mode            = menuCase
+	energy          = 100
+	energyUnit      = 0.1
+	yesLight        = true
+	levNow          = 0
+	bonusCount      = 0
+	livesStart      = 3
+	die             = false
+	appleEffect     = 1.0
+	livesEffect     = 1.0
+	mySpeed         = 3.0
+	myWallDist      = 0.4
+	myHeight        = myHeightStart
+	myUpSpeed       = 0.0
+	onGround        = true
+	amountOfLevels  = 0
 
 	as actionSquare
 
-	pos, posStart, dir, plane pixel.Vec
-    floor map[int](*image.RGBA)
-    ceiling *image.RGBA
-    livesPic *image.RGBA
-    lives int
+	pos, dir, plane Vec3
+	floor map[int](*image.RGBA)
+	ceiling *image.RGBA
+	lives int
 
-    monWhoKilled int
+	monWhoKilled int
 
-    alpha map[string](*image.RGBA)
-    mon = []Monster{}
-    bon = []Bonus{}
-    bonusInfo = map[int](*BonusForm){}
-    retBlock = map[int](*image.RGBA){}
+	alpha map[string](*image.RGBA)
+	spriteInfo = map[int](*Sprite){}
 )
 
-func setup() {
-	dir = pixel.V(-1.0, 0.0)
-	plane = pixel.V(0.0, 0.66)
-    lives = livesStart
+type Blocks [maxLevSide][maxLevSide][maxLevHeight]int
+
+type Level struct {
+	block      Blocks
+	floorsHere int
+	obj        []([]Obj)
+	posStart   Vec3
 }
-
-type Level [maxLevSide][maxLevSide]int
-
 var world = [](*Level){}
 
-type BonusForm struct {
-    graphs  int
-    graph   int
-    bonusH  int
-    bonusW  int
-    pic     [](*image.RGBA)
-    show    bool
+type Sprite struct {
+	graphs        int
+	graph         int
+	spriteHeight  int
+	spriteWidth   int
+	pic           [](*image.RGBA)
+	show          bool
 }
 
-type Monster struct {
-    X       float64
-    Y       float64
-    XStart  float64
-    YStart  float64
-    side    float64
-    height  float64
-    form    int
-    pic     *image.RGBA
-    live    float64
-    alive   bool
+type Obj struct {
+	pos      Vec3
+	posStart Vec3
+	dir      Vec3
+	width    float64
+	height   float64
+	form     int
+	about    int
+	live     float64
+	alive    bool
+	taken    bool
+	touched  bool
+	speed    float64
 }
 
-type Bonus struct {
-    X       float64
-    Y       float64
-    taken   bool
-    form    int
+type About struct {
+	speed       float64
+	through     bool
+	liveMax     float64
+	screamer    *image.RGBA
+}
+var about = []About{
+	About{speed: 1.0, through: false, liveMax: 5.0},
+	About{speed: 1.0, through: true, liveMax: 10.0},
 }
 
-type Form struct {
-    speed       float64
-    rand        bool
-    through     bool
-    liveMax     float64
-    screamer    *image.RGBA
+var wallTexture = [](*image.RGBA){}
+
+
+
+// ===================== DRAW FRAME =====================
+
+func setLight(lightDist float64, col *color.Color) {
+	d := lightDist / maxLight
+	k := 1 / forceLight
+	if d >= 1 {
+		*col = color.RGBA{0, 0, 0, 0}
+	} else {
+		d = 1 - d
+		root := math.Pow(d, k)
+		r, g, b, a := (*col).RGBA()
+		r = uint32(float64(r) / 255 * root)
+		g = uint32(float64(g) / 255 * root)
+		b = uint32(float64(b) / 255 * root)
+		a = uint32(float64(a) / 255 * root)
+		r = uint32(float64(r) / livesEffect)
+		b = uint32(float64(b) / livesEffect)
+		g = uint32(float64(g) / appleEffect)
+		b = uint32(float64(b) / appleEffect)
+		*col = color.RGBA{uint8(r), uint8(g), uint8(b), uint8(a)}
+	}
 }
 
-var forms = []Form{
-    Form{speed: 0.03, rand: false, liveMax: 5.0},
-    Form{speed: 0.02, rand: true, through: false, liveMax: 10.0},
+func min123(x1 float64, x2 float64, x3 float64) int {
+	if x1 < x2 {
+		if x1 < x3 {
+			return 1
+		}
+		return 3
+	}
+	if x2 < x3 {
+		return 2
+	}
+	return 3
 }
 
-var wallTexture = make([](*image.RGBA), wallsAmount)
-
-func getLevel(path string) (*Level) {
-    levPic := getPic(path)
-    bounds := levPic.Bounds()
-    lev := Level{}
-    for i := 0; i < bounds.Max.X; i++ {
-        for j := 2; j < bounds.Max.Y; j++ {
-            colorTo := levPic.At(i, j)
-            lev[i][j-2] = 0
-            switch colorTo {
-                case levPic.At(1, 0):
-                    lev[i][j-2] = wall0Block
-                case levPic.At(2, 0):
-	                pos = pixel.V(float64(i)+0.5, float64(j)+0.5-2)
-	                posStart = pixel.V(float64(i)+0.5, float64(j)+0.5-2)
-                case levPic.At(3, 0):
-                    bon = append(bon, Bonus{X: float64(i)+0.5, Y: float64(j)+0.5-2,
-                        taken: false, form: energyBonusForm})
-                    lev[i][j-2] = energyBlock
-                case levPic.At(4, 0):
-                    bon = append(bon, Bonus{X: float64(i)+0.5, Y: float64(j)+0.5-2,
-                        taken: false, form: livesBonusForm})
-                    lev[i][j-2] = 0
-                case levPic.At(5, 0):
-                    bon = append(bon, Bonus{X: float64(i)+0.5, Y: float64(j)+0.5-2,
-                        taken: false, form: appleBonusForm})
-                    lev[i][j-2] = 0
-                case levPic.At(6, 0):
-                    lev[i][j-2] = wall2Block
-                case levPic.At(7, 0):
-                    lev[i][j-2] = wall3Block
-                case levPic.At(8, 0):
-                    lev[i][j-2] = wall4Block
-                case levPic.At(9, 0):
-                    lev[i][j-2] = wall5Block
-                case levPic.At(0, 1):
-                    mon = append(mon, Monster{XStart: float64(i)+0.5, YStart: float64(j)+0.5-2,
-                        side: 0.4, height: 0.8, form: 0})
-                case levPic.At(1, 1):
-                    mon = append(mon, Monster{XStart: float64(i)+0.5, YStart: float64(j)+0.5-2,
-                        side: 0.4, height: 0.8, form: 1})
-            }
-        }
-    }
-    return &lev
+func nearestPlane(p float64, v float64) float64 {
+	if v > 0 {
+		return float64(int(p) + 1)
+	}
+	return float64(int(p))
 }
+
+func specRound(a float64) int {
+	i := int(a)
+	if a - float64(i) > 0.5 {
+		return i + 1
+	}
+	return i
+}
+
+func signOf(a float64) float64 {
+	if a > 0 {
+		return 1.0
+	}
+	return -1.0
+}
+
+func dropInt(v Vec3) Vec3 {
+	return V3(float64(int(v.X)), float64(int(v.Y)), float64(int(v.Z)))
+}
+
+// Find the crossed cube of the world
+func crossBlock(finalPoint Vec3, plain int, v Vec3) (int, bool) {
+	ret := dropInt(finalPoint)
+	switch plain {
+		case 1:
+			ret.X = finalPoint.X
+			if (v.X < 0) { ret.X -= 1 }
+		case 2:
+			ret.Y = finalPoint.Y
+			if (v.Y < 0) { ret.Y -= 1 }
+		case 3:
+			ret.Z = finalPoint.Z
+			if (v.Z < 0) { ret.Z -= 1 }
+	}
+	if finalPoint.X < 0.001 || finalPoint.Y < 0.001 || finalPoint.X >= maxLevSide - 1 || finalPoint.Y >= maxLevSide - 1 {
+		return 0, true
+	}
+	if finalPoint.Z < 0.001 {
+		return world[levNow].block[specRound(ret.X)][specRound(ret.Y)][0], true
+	}
+	if (finalPoint.Z > float64(world[levNow].floorsHere) - 0.001) {
+		return CEILING, true
+	}
+	result := world[levNow].block[specRound(ret.X)][specRound(ret.Y)][specRound(ret.Z)]
+	return result, result > 0
+}
+
+func frameGame(win *pixelgl.Window) {
+	w := float64(width)
+	h := float64(height)
+	focus := 0.5;
+	distToFrame := dir.Scaled(focus);
+	parts := 10
+	var wg sync.WaitGroup
+	wg.Add(parts)
+	var mu sync.Mutex
+	for part := 0; part < parts; part++ {
+		go func(mu *sync.Mutex, part int) {
+			defer wg.Done()
+			//po := time.Now()
+			im := image.NewRGBA(image.Rect(0, 0, width/parts, height))
+			for x := part*width/parts; x < (part+1)*width/parts; x++ {
+				frameShiftX := V3((2 * float64(x) / w - 1), 0, 0).Rotated(plane.Angle())
+				for z := 0; z < height; z++ {
+					frameShiftZ := V3(0, 0, (2 * float64(z) / h - 1) * (h / w))
+					lookingDirection := (distToFrame.Add(frameShiftX).Add(frameShiftZ)).Unit()
+					crossedSomeWall := false
+					nextX := nearestPlane(pos.X, lookingDirection.X)
+					nextY := nearestPlane(pos.Y, lookingDirection.Y)
+					nextZ := nearestPlane(pos.Z, lookingDirection.Z)
+					iter := 0
+					for !crossedSomeWall {
+						lenX := MAX
+						lenY := MAX
+						lenZ := MAX
+						lenFinal := 0.0
+						if (math.Abs(lookingDirection.X) > 0.0001) {
+							lenX = math.Abs(pos.X - nextX) * (1 / math.Abs(lookingDirection.X))
+						}
+						if (math.Abs(lookingDirection.Y) > 0.0001) {
+							lenY = math.Abs(pos.Y - nextY) * (1 / math.Abs(lookingDirection.Y))
+						}
+						if (math.Abs(lookingDirection.Z) > 0.0001) {
+							lenZ = math.Abs(pos.Z - nextZ) * (1 / math.Abs(lookingDirection.Z))
+						}
+						plainCrossed := min123(lenX, lenY, lenZ);
+						switch plainCrossed {
+							case 1:
+								lenFinal = lenX
+								nextX += signOf(lookingDirection.X)
+							case 2:
+								lenFinal = lenY
+								nextY += signOf(lookingDirection.Y)
+							case 3:
+								lenFinal = lenZ
+								nextZ += signOf(lookingDirection.Z)
+						}
+						finalPoint := pos.Add(lookingDirection.Scaled(lenFinal))
+						dropPoint := finalPoint.Sub(dropInt(finalPoint))
+						crossedBlock, flagCrossed := crossBlock(finalPoint, plainCrossed, lookingDirection)
+						if flagCrossed {
+							crossedSomeWall = true
+							var colorTo color.Color
+							switch crossedBlock {
+									case 0, -1:
+										bounds := floor[crossedBlock].Bounds()
+										colorTo = floor[crossedBlock].At(int(float64(bounds.Max.X) * dropPoint.X),
+											int(float64(bounds.Max.Y) * dropPoint.Y))
+									case CEILING:
+										bounds := ceiling.Bounds()
+										colorTo = ceiling.At(int(float64(bounds.Max.X) * dropPoint.X),
+											int(float64(bounds.Max.Y) * dropPoint.Y))
+									default:
+									switch plainCrossed {
+										case 1:
+											bounds := wallTexture[crossedBlock].Bounds()
+											colorTo = wallTexture[crossedBlock].At(int(float64(bounds.Max.X) * dropPoint.Y),
+												int(float64(bounds.Max.Y) * dropPoint.Z))
+										case 2:
+											bounds := wallTexture[crossedBlock].Bounds()
+											colorTo = wallTexture[crossedBlock].At(int(float64(bounds.Max.X) * dropPoint.X),
+												int(float64(bounds.Max.Y) * dropPoint.Z))
+										case 3:
+											bounds := wallTexture[crossedBlock].Bounds()
+											colorTo = wallTexture[crossedBlock].At(int(float64(bounds.Max.X) * dropPoint.X),
+												int(float64(bounds.Max.Y) * dropPoint.Y))
+									}
+							}
+							setLight(lenFinal, &colorTo)
+							im.Set(x - part*width/parts, height - z - 1, colorTo)
+							
+							minDistObj := maxLight + 1.0
+							for k, _ := range world[levNow].obj {
+								for _, m := range world[levNow].obj[k] {
+									if k == MON && !m.alive || k == BON && (m.taken || !spriteInfo[m.form].show) || k == BUL && m.touched {
+										continue
+									}
+									monDist := m.pos.Sub(pos).ReduceZ()
+									if monDist.Len() > minDistObj {
+										continue
+									}
+									minDistObj = monDist.Len()
+									try := lookingDirection.Rotated(-monDist.Angle())
+									if try.X > 0 {
+										try = try.Scaled(monDist.Len() / try.X)
+									} else {
+										continue // when the monster is somewhere beside the back
+									}
+									lightDist := try.Len()
+									if math.Abs(try.Y) > m.width || lightDist > lenFinal {
+										continue // when "look" doenst cross the monster or cross a wall before
+									}
+									f := m.form
+									g := spriteInfo[f].graph
+									dZ := pos.Z + try.Z
+									if dZ < m.pos.Z - m.height || dZ > m.pos.Z + m.height {
+										continue
+									}
+									colorTo := spriteInfo[f].pic[g].At(int(float64(spriteInfo[f].spriteWidth)*(try.Y/m.width/2 + 0.5)),
+										int(float64(spriteInfo[f].spriteHeight)*(-(dZ-m.pos.Z)/m.height/2 + 0.5)))
+									if colorTo != spriteInfo[f].pic[g].At(0, 0) {
+										setLight(lightDist, &colorTo)
+										im.Set(x - part*width/parts, height - z - 1, colorTo)
+									}
+								}
+							}
+						}
+						if iter > 100 {
+							log.Println("iter")
+							break
+						}
+					}
+				}
+			}
+			var mc pixel.Vec
+			p := pixel.PictureDataFromImage(im)
+			c := win.Bounds().Center()
+			mc = pixel.V(-w/2 + (float64(part)+0.5)*float64(width/parts), 0)
+			mu.Lock()
+			pixel.NewSprite(p, p.Bounds()).Draw(win, pixel.IM.Moved(c.Add(mc)).Scaled(c, scale))
+			mu.Unlock()
+			//dt := time.Since(po).Seconds()
+			//log.Println(part, dt)
+		}(&mu, part)
+	}
+	wg.Wait()
+	im := image.NewRGBA(image.Rect(0, 0, width, height))
+	coefW := w / 320
+	coefH := h / 200
+	drawPic(im, int(2 * coefW), int(2 * coefH), spriteInfo[appleSprite].pic[0], 0.5 * coefW)
+	writeText(im, strconv.Itoa(bonusCount), int(30 * coefW), int(2 * coefH), dDir, color.RGBA{255, 0, 0, 255}, int(3 * coefW))
+	drawPic(im, int(70 * coefW), int(2 * coefH), spriteInfo[livesSprite].pic[0], 0.3 * coefW)
+	writeText(im, strconv.Itoa(lives), int(98 * coefW), int(2 * coefH), dDir, color.RGBA{255, 0, 0, 255}, int(3 * coefW))
+	drawPic(im, int(138 * coefW), int(2 * coefH), spriteInfo[energySprite].pic[0], 0.5 * coefW)
+	writeText(im, strconv.Itoa(energy)+"%", int(166 * coefW), int(2 * coefH), dDir, color.RGBA{255, 0, 0, 255}, int(3 * coefW))
+	
+	p := pixel.PictureDataFromImage(im)
+	c := win.Bounds().Center()
+	pixel.NewSprite(p, p.Bounds()).Draw(win, pixel.IM.Moved(c).Scaled(c, scale))
+
+	if showMap {
+		m := pixel.PictureDataFromImage(minimap())
+		
+		mc := m.Bounds().Min.Add(pixel.V(-m.Rect.W(), m.Rect.H()))
+		
+		pixel.NewSprite(m, m.Bounds()).
+			Draw(win, pixel.IM.Moved(mc).Rotated(mc, -1.6683362599999894).
+				ScaledXY(pixel.ZV, pixel.V(-scale*2*(float64(width)/320), scale*2*(float64(height)/200))))
+	}
+	
+	win.Update()
+}
+
+
+
+
+// ===================== MINIMAP =====================
 
 func getColor(x, y int) color.RGBA {
-	switch world[levNow][x][y] {
-	case 0:
+	switch world[levNow].block[x][y][0] {
+	case emptyBlock:
 		return color.RGBA{43, 30, 24, 255}
-	case 1:
+	case wall0Block:
 		return color.RGBA{100, 89, 73, 255}
-	case 2:
+	case wall1Block:
 		return color.RGBA{110, 23, 0, 255}
-	case 3:
+	case wall2Block:
 		return color.RGBA{45, 103, 171, 255}
-	case 4:
+	case wall3Block:
 		return color.RGBA{123, 84, 33, 255}
-	case 5:
+	case wall4Block:
 		return color.RGBA{158, 148, 130, 255}
-	case 6:
+	case wall5Block:
 		return color.RGBA{203, 161, 47, 255}
 	case 7:
 		return color.RGBA{255, 107, 0, 255}
@@ -237,237 +440,41 @@ func getColor(x, y int) color.RGBA {
 	}
 }
 
-func setLight(lightDist float64, col *color.Color) {
-    d := lightDist / maxLight
-    k := 1 / forceLight
-    if d >= 1 {
-        *col = color.RGBA{0, 0, 0, 0}
-    } else {
-        d = 1 - d
-        root := math.Pow(d, k)
-        r, g, b, a := (*col).RGBA()
-        r = uint32(float64(r) / 255 * root)
-        g = uint32(float64(g) / 255 * root)
-        b = uint32(float64(b) / 255 * root)
-        a = uint32(float64(a) / 255 * root)
-        g = uint32(float64(g) / livesEffect)
-        b = uint32(float64(b) / livesEffect)
-        r = uint32(float64(r) / appleEffect)
-        b = uint32(float64(b) / appleEffect)
-        *col = color.RGBA{uint8(r), uint8(g), uint8(b), uint8(a)}
-    }
-}
-
-func frameGame() *image.RGBA {
-	im := image.NewRGBA(image.Rect(0, 0, width, height))
-    space := float64(width) / 2
-
-    for x := 0; x < width; x++ {
-		cameraX := 2 * float64(x) / float64(width) - 1
-        look := (pixel.V(0, 1)).Scaled(space/(float64(width)/2)).Add(pixel.V(cameraX, 0)).Rotated(plane.Angle())
-        iterX := 0
-        iterY := 0
-        signX := -1
-        signY := -1
-        dX := pos.X - float64(int(pos.X))
-        if look.X > 0 {
-            dX = 1.0 - dX
-            signX = 1
-        }
-        dY := pos.Y - float64(int(pos.Y))
-        if look.Y > 0 {
-            dY = 1.0 - dY
-            signY = 1
-        }
-        empty := true
-        for empty {
-            distX := dX + float64(iterX)
-            distY := dY + float64(iterY)
-            parX := math.Abs(look.X) * distY
-            parY := math.Abs(look.Y) * distX
-            inVer := false
-            fromLeftSide := 0.0
-            if parX > parY {
-                iterX += 1
-                inVer = true
-                if math.Abs(look.X) > 0 {
-                    fromLeftSide = distY - math.Abs(look.Scaled(distX/math.Abs(look.X)).Y)
-                }
-                if look.X > 0 && look.Y < 0 || look.X < 0 && look.Y > 0 {
-                    fromLeftSide = 1.0 - fromLeftSide
-                }
-            } else {
-                iterY += 1
-                if math.Abs(look.Y) > 0 {
-                    fromLeftSide = distX - math.Abs(look.Scaled(distY/math.Abs(look.Y)).X)
-                }
-                if look.X > 0 && look.Y > 0 || look.X < 0 && look.Y < 0 {
-                    fromLeftSide = 1.0 - fromLeftSide
-                }
-            }
-            whereX := int(pos.X) + iterX*signX
-            whereY := int(pos.Y) + iterY*signY
-            ind := world[levNow][whereX][whereY]
-            if ind > 0 {
-                empty = false
-                finalDist := 0.0
-                if inVer && math.Abs(look.X) > 0 {
-                    finalDist = look.Len() * distX / math.Abs(look.X)
-                } else {
-                    finalDist = look.Len() * distY / math.Abs(look.Y)
-                }
-                for y := 0; y < height; y++ {
-		            cameraY := 2 * float64(y) / float64(height) - 1
-                    up := (finalDist*(float64(height)/2)/space) * cameraY
-                    var colorTo color.Color
-                    lightDist := math.Sqrt(finalDist * finalDist + up * up)
-                    if up > 0.5 {
-                        floorVec := pos.Add(pixel.V(finalDist * 0.5 / up, 0).Rotated(look.Angle()))
-                        floorType := world[levNow][int(floorVec.X)][int(floorVec.Y)]
-                        bounds := floor[floorType].Bounds()
-                        floorVec.X = floorVec.X - float64(int(floorVec.X))
-                        floorVec.Y = floorVec.Y - float64(int(floorVec.Y))
-                        colorTo = floor[floorType].At(int(float64(bounds.Max.X)*floorVec.X),
-                            int(float64(bounds.Max.Y)*floorVec.Y))
-                        lightDist *= (0.5 / up)
-                    } else if up < -0.5 {
-                        bounds := ceiling.Bounds()
-                        floorVec := pos.Add(pixel.V(finalDist * 0.5 / (-up), 0).Rotated(look.Angle()))
-                        floorVec.X = floorVec.X - float64(int(floorVec.X))
-                        floorVec.Y = floorVec.Y - float64(int(floorVec.Y))
-                        colorTo = ceiling.At(int(float64(bounds.Max.X)*floorVec.X),
-                            int(float64(bounds.Max.Y)*floorVec.Y))
-                        lightDist *= (0.5 / (-up))
-                    } else {
-                        bounds := wallTexture[ind].Bounds()
-                        colorTo = wallTexture[ind].At(int(float64(bounds.Max.X)*fromLeftSide),
-                            int(float64(bounds.Max.Y)*(up+0.5)))
-                    }
-                    setLight(lightDist, &colorTo)
-                    im.Set(x, y, colorTo)
-                }
-                for y := 0; y < height; y++ {
-                    minDistMon := maxLight + 1.0
-                    drown := false
-                    for _, m := range mon {
-                        draw := false
-                        monDist := pixel.V(m.X, m.Y).Sub(pos)
-                        if !m.alive || monDist.Len() > maxLight {
-                            continue
-                        }
-                        if monDist.Len() < minDistMon || drown == false {
-                            minDistMon = monDist.Len()
-                            draw = true
-                        }
-                        try := look.Rotated(-monDist.Angle())
-                        if try.X > 0 {
-                            try = try.Scaled(monDist.Len() / try.X)
-                        } else {
-                            continue
-                        }
-                        if math.Abs(try.Y) > m.side || try.Len() >= finalDist {
-                            continue
-                        }
-                        bounds := m.pic.Bounds()
-                        cameraY := 2 * float64(y) / float64(height) - 1
-                        up := (try.X*(float64(height)/2)/space) * cameraY
-                        lightDist := math.Sqrt(monDist.Len() * monDist.Len() + up * up)
-                        if up > m.height - 0.5 || up < -0.5 {
-                            continue
-                        }
-                        colorTo := m.pic.At(int(float64(bounds.Max.X)*(1-(try.Y/m.side/2+0.5))),
-                            int(float64(bounds.Max.Y)*(1-(up+0.5)/m.height)))
-                        if draw && colorTo != m.pic.At(0, 0) {
-                            setLight(lightDist, &colorTo)
-                            im.Set(x, height - y, colorTo)
-                            drown = true
-                        }
-                    }
-                    for _, m := range bon {
-                        draw := false
-                        monDist := pixel.V(m.X, m.Y).Sub(pos)
-                        if monDist.Len() > maxLight || m.taken || !bonusInfo[m.form].show {
-                            continue
-                        }
-                        if monDist.Len() < minDistMon || drown == false {
-                            minDistMon = monDist.Len()
-                            draw = true
-                        }
-                        try := look.Rotated(-monDist.Angle())
-                        if try.X > 0 {
-                            try = try.Scaled(monDist.Len() / try.X)
-                        } else {
-                            continue
-                        }
-                        if math.Abs(try.Y) > 0.2 || try.Len() >= finalDist {
-                            continue
-                        }
-                        f := m.form
-                        g := bonusInfo[f].graph
-                        bounds := bonusInfo[f].pic[g].Bounds()
-                        cameraY := 2 * float64(y) / float64(height) - 1
-                        up := (try.X*(float64(height)/2)/space) * cameraY
-                        lightDist := math.Sqrt(monDist.Len() * monDist.Len() + up * up)
-                        if up > 0 || up < -0.4 {
-                            continue
-                        }
-                        colorTo := bonusInfo[f].pic[g].At(int(float64(bounds.Max.X)*(1-(try.Y/0.2/2+0.5))),
-                            int(float64(bounds.Max.Y)*(1-(up+0.4)/0.4)))
-                        if draw && colorTo != bonusInfo[f].pic[g].At(0, 0) {
-                            setLight(lightDist, &colorTo)
-                            im.Set(x, height - y, colorTo)
-                            drown = true
-                        }
-                    }
-                }
-            }
-            if float64(iterX) > 100 || float64(iterY) > 100 {
-                empty = false
-            }
-        }
-    }
-    drawPic(im, 2, 2, bonusInfo[appleBonusForm].pic[0], 0.5)
-    writeText(im, strconv.Itoa(bonusCount), 30, 2, dDir, color.RGBA{255, 0, 0, 255}, 3)
-    drawPic(im, 70, 2, bonusInfo[livesBonusForm].pic[0], 0.3)
-    writeText(im, strconv.Itoa(lives), 98, 2, dDir, color.RGBA{255, 0, 0, 255}, 3)
-    drawPic(im, 138, 2, bonusInfo[energyBonusForm].pic[0], 0.5)
-    writeText(im, strconv.Itoa(energy)+"%", 166, 2, dDir, color.RGBA{255, 0, 0, 255}, 3)
-    return im
-}
-
 func minimap() *image.RGBA {
 	m := image.NewRGBA(image.Rect(0, 0, 24, 26))
 
-	//center := world[levNow][int(pos.X)][int(pos.X)]
+	//centerX := int(pos.X)
+	//centerY := int(pos.Y)
 
-    for x, row := range world[levNow] {
+	for x, row := range world[levNow].block {
 		for y, _ := range row {
 			c := getColor(x, y)
 			if c.A == 255 {
 				c.A = 96
 			}
+			//if (24 + x - centerX < 0 || 24 + x - centerX >= 24) && (26 + y - centerY < 0 || 26 + y - centerY >= 26) { continue }
 			m.Set(x, y, c)
 		}
 	}
 
 	m.Set(int(pos.X), int(pos.Y), color.RGBA{255, 0, 0, 255})
-	for _, i := range bon {
-        if !i.taken {
-            switch i.form {
-                case appleBonusForm:
-                    m.Set(int(i.X), int(i.Y), color.RGBA{0, 255, 0, 255})
-                case livesBonusForm:
-                    m.Set(int(i.X), int(i.Y), color.RGBA{0, 255, 255, 255})
-                case energyBonusForm:
-                    m.Set(int(i.X), int(i.Y), color.RGBA{255, 255, 0, 255})
-            }
-        }
-    }
-    for _, i := range mon {
-        if i.alive {
-            m.Set(int(i.X), int(i.Y), color.RGBA{0, 0, 255, 255})
-        }
-    }
+	for _, i := range world[levNow].obj[BON] {
+		if !i.taken {
+			switch i.form {
+				case appleSprite:
+					m.Set(int(i.pos.X), int(i.pos.Y), color.RGBA{0, 255, 0, 255})
+				case livesSprite:
+					m.Set(int(i.pos.X), int(i.pos.Y), color.RGBA{0, 255, 255, 255})
+				case energySprite:
+					m.Set(int(i.pos.X), int(i.pos.Y), color.RGBA{255, 255, 0, 255})
+			}
+		}
+	}
+	for _, i := range world[levNow].obj[MON] {
+		if i.alive {
+			m.Set(int(i.pos.X), int(i.pos.Y), color.RGBA{0, 0, 255, 255})
+		}
+	}
 
 
 	if as.active {
@@ -478,6 +485,10 @@ func minimap() *image.RGBA {
 
 	return m
 }
+
+
+
+// ===================== ACTION SQUARE =====================
 
 func getActionSquare() actionSquare {
 	pt := image.Pt(int(pos.X)+1, int(pos.Y))
@@ -505,7 +516,7 @@ func getActionSquare() actionSquare {
 	active := pt.X > 0 && pt.X < 23 && pt.Y > 0 && pt.Y < 23
 
 	if active {
-		block = world[levNow][pt.X][pt.Y]
+		block = world[levNow].block[pt.X][pt.Y][0]
 	}
 
 	return actionSquare{
@@ -525,131 +536,224 @@ type actionSquare struct {
 
 func (as actionSquare) toggle(n int) {
 	if as.active {
-		if world[levNow][as.X][as.Y] == 0 {
-			world[levNow][as.X][as.Y] = n
+		if world[levNow].block[as.X][as.Y][0] == 0 {
+			world[levNow].block[as.X][as.Y][0] = n
 		} else {
-			world[levNow][as.X][as.Y] = 0
+			world[levNow].block[as.X][as.Y][0] = 0
 		}
 	}
 }
 
 func (as actionSquare) set(n int) {
 	if as.active {
-		world[levNow][as.X][as.Y] = n
+		world[levNow].block[as.X][as.Y][0] = n
 	}
 }
 
-func bonusMove() {
-    for i, b := range bon {
-        monDir := pos.Sub(pixel.V(b.X, b.Y))
-        if monDir.Len() < 0.5 && !b.taken {
-            switch b.form {
-                case appleBonusForm:
-                    bonusCount += 1
-                    bon[i].taken = true
-                    appleEffect += 1.0
-                case livesBonusForm:
-                    lives += 1
-                    bon[i].taken = true
-                    livesEffect += 1.0
-                case energyBonusForm:
-                    if !yesLight {
-                        yesLight = true
-                        maxLight = 4.0
-                    }
-                    if energy < 100 {
-                        energy += 1
-                    }
-            }
-        }
-    }
+
+
+// ===================== MOVE =====================
+
+func trunc(f float64) float64 {
+	return f - float64(int(f))
 }
 
-func monsterMove() {
-    for i, m := range mon {
-        monDir := pos.Sub(pixel.V(m.X, m.Y))
-        if !m.alive {
-            continue
-        }
-        if monDir.Len() < 0.5 {
-            monWhoKilled = m.form
-            die = true
-            lives -= 1
-            break
-        }
-        if forceLight > 1.1 && monDir.Len() <= maxLight && m.live > 0 {
-            mon[i].live -= 0.01 * monDir.Len() * forceLight
-        }
-        if m.live <= 0 {
-            mon[i].alive = false
-        }
-        speed := forms[m.form].speed
-        monDir = pixel.V(speed, 0).Rotated(monDir.Angle())
-        newX := m.X + monDir.X
-        newY := m.Y + monDir.Y
-        signX := -1.0
-        signY := -1.0
-        if monDir.X > 0 {
-            signX = 1.0
-        }
-        if monDir.Y > 0 {
-            signY = 1.0
-        }
-        if forms[m.form].through {
-            mon[i].X = newX
-            mon[i].Y = newY
-            continue
-        }
-        stopX := false
-        seeCorner := true
-        if world[levNow][int(newX + m.side*signX)][int(newY)] != 0 {
-            newX = m.X
-            newY = m.Y + speed*signY
-            stopX = true
-            seeCorner = false
-        }
-        if world[levNow][int(newX)][int(newY + m.side*signY)] != 0 {
-            newY = m.Y
-            newX = m.X + speed*signX
-            if stopX {
-                newX = m.X
-            }
-            seeCorner = false
-        }
-        if !seeCorner {
-            mon[i].X = newX
-            mon[i].Y = newY
-            continue
-        }
-        diff := pixel.V((newX - float64(int(newX))) * (-1),
-            (newY - float64(int(newY))) * (-1))
-        if diff.X > 0.5 {
-            diff.X -= 1.0
-        }
-        if diff.X < -0.5 {
-            diff.X += 1.0
-        }
-        if diff.Y > 0.5 {
-            diff.Y -= 1.0
-        }
-        if diff.Y < -0.5 {
-            diff.Y += 1.0
-        }
-        if world[levNow][int(newX + diff.X*1.01)][int(newY + diff.Y*1.01)] != 0 {
-            monDir = monDir.Scaled(m.side/monDir.Len())
-            newdiff := diff.Scaled(speed/diff.Len())
-            if pixel.V(1, 0).Rotated(monDir.Angle()).Rotated(-diff.Angle()).Y > 0 {
-                newdiff = newdiff.Rotated(math.Pi/2)
-            } else {
-                newdiff = newdiff.Rotated(-math.Pi/2)
-            }
-            newX = m.X + newdiff.X
-            newY = m.Y + newdiff.Y
-        }
-        mon[i].X = newX
-        mon[i].Y = newY
-    }
+func monsterMove(dt float64) {
+	for i, m := range world[levNow].obj[MON] {
+		if !m.alive {
+			continue
+		}
+		posXY := V3(pos.X, pos.Y, m.pos.Z)
+		monDir := posXY.Sub(m.pos)
+		if monDir.Len() < 0.5 {
+			monWhoKilled = m.about
+			die = true
+			lives -= 1
+			break
+		}
+		if forceLight > 1.1 && monDir.Len() <= maxLight && m.live > 0 {
+			world[levNow].obj[MON][i].live -= 0.01 * monDir.Len() * forceLight
+		}
+		if m.live <= 0 {
+			world[levNow].obj[MON][i].alive = false
+			break
+		}
+		speed := about[m.about].speed * dt
+		monDir = monDir.SetLen(speed)
+		if about[m.about].through {
+			world[levNow].obj[MON][i].pos = m.pos.Add(monDir)
+			continue
+		}
+		
+		signX := -1.0
+		signY := -1.0
+		if monDir.X > 0 { signX = 1.0 }
+		if monDir.Y > 0 { signY = 1.0 }
+		
+		w1 := world[levNow].block[int(m.pos.X) - 1][int(m.pos.Y) - 1][0]
+		w2 := world[levNow].block[int(m.pos.X)][int(m.pos.Y) - 1][0]
+		w3 := world[levNow].block[int(m.pos.X) + 1][int(m.pos.Y) - 1][0]
+		w4 := world[levNow].block[int(m.pos.X) - 1][int(m.pos.Y)][0]
+		w6 := world[levNow].block[int(m.pos.X) + 1][int(m.pos.Y)][0]
+		w7 := world[levNow].block[int(m.pos.X) - 1][int(m.pos.Y) + 1][0]
+		w8 := world[levNow].block[int(m.pos.X)][int(m.pos.Y) + 1][0]
+		w9 := world[levNow].block[int(m.pos.X) + 1][int(m.pos.Y) + 1][0]
+		
+		var vY, wY, wXY, wX, vX int
+		if monDir.X >= 0 && monDir.Y >= 0 {
+			vY = w7
+			wY = w8
+			wXY = w9
+			wX = w6
+			vX = w3
+		} else if monDir.X >= 0 && monDir.Y < 0 {
+			vY = w1
+			wY = w2
+			wXY = w3
+			wX = w6
+			vX = w9
+		} else if monDir.X < 0 && monDir.Y < 0 {
+			vY = w3
+			wY = w2
+			wXY = w1
+			wX = w4
+			vX = w7
+		} else {
+			vY = w9
+			wY = w8
+			wXY = w7
+			wX = w4
+			vX = w1
+		}
+		
+		if world[levNow].block[int(m.pos.X)][int(m.pos.Y)][0] > 0 {
+			log.Println("ERRORRR!!!")
+			monWhoKilled = m.about
+			die = true
+			lives -= 1
+			break
+		}
+		
+		stopedX := false
+		seeCorner := false
+		shiftX := trunc(m.pos.X + monDir.X)
+		if monDir.X >= 0 {
+			shiftX = 1 - shiftX
+		}
+		if wX > 0 && shiftX < m.width {
+			monDir.X -= (m.width - shiftX) * signX
+			stopedX = true
+			//log.Println("Near X wall.")
+		}
+		shiftY := trunc(m.pos.Y + monDir.Y)
+		if monDir.Y >= 0 {
+			shiftY = 1 - shiftY
+		}
+		if wY > 0 && shiftY < m.width {
+			monDir.Y -= (m.width - shiftY) * signY
+			if stopedX {
+				seeCorner = true
+			}
+			//log.Println("Near Y wall.")
+		}
+		if seeCorner {
+			world[levNow].obj[MON][i].pos = m.pos.Add(monDir)
+			//log.Println("I`m in a corner!")
+			continue
+		}
+		
+		if wXY > 0 && wX <= 0 && wY <= 0 {
+			shiftXY := V3(shiftX * signX, shiftY * signY, 0)
+			if shiftXY.Len() < m.width {
+				//log.Println("Left or Right?")
+				if monDir.Rotated(-shiftXY.Angle()).Y > 0 {
+					monDir = monDir.Rotated(math.Pi/2)
+					//log.Println("From left")
+				} else {
+					monDir = monDir.Rotated(-math.Pi/2)
+					//log.Println("From right")
+				}
+				world[levNow].obj[MON][i].pos = m.pos.Add(monDir)
+				continue
+			}
+		}
+		
+		crossedAxisY := int(m.pos.Y) != int(m.pos.Y + monDir.Y)
+		if wX <= 0 && vX > 0 && !crossedAxisY {
+			shift_vX := V3(shiftX * signX, (shiftY - 1) * signY, 0)
+			distanceToTheCorner, wayCrossedCorner := math.Sincos(monDir.Angle() - shift_vX.Angle())
+			distanceToTheCorner *= shift_vX.Len()
+			if math.Abs(distanceToTheCorner) < m.width && wayCrossedCorner > 0 {
+				monDir.X = 0
+				world[levNow].obj[MON][i].pos = m.pos.Add(monDir)
+				//log.Println("vX", distanceToTheCorner, shift_vX, m.pos.X, m.pos.Y)
+				continue
+			}
+		}
+		
+		crossedAxisX := int(m.pos.X) != int(m.pos.X + monDir.X)
+		if wY <= 0 && vY > 0 && !crossedAxisX {
+			shift_vY := V3((shiftX - 1) * signX, shiftY * signY, 0)
+			distanceToTheCorner, wayCrossedCorner := math.Sincos(monDir.Angle() - shift_vY.Angle())
+			distanceToTheCorner *= shift_vY.Len()
+			if math.Abs(distanceToTheCorner) < m.width && wayCrossedCorner > 0 {
+				monDir.Y = 0
+				//log.Println("vY", distanceToTheCorner, shift_vY, m.pos.X, m.pos.Y)
+			}
+		}
+		
+		world[levNow].obj[MON][i].pos = m.pos.Add(monDir)
+	}
 }
+
+func bonusMove(dt float64) {
+	for i, b := range world[levNow].obj[BON] {
+		bonDir := pos.Sub(b.pos)
+		if bonDir.Len() < 0.5 && !b.taken {
+			switch b.form {
+				case appleSprite:
+					bonusCount += 1
+					world[levNow].obj[BON][i].taken = true
+					appleEffect += 1.0
+				case livesSprite:
+					lives += 1
+					world[levNow].obj[BON][i].taken = true
+					livesEffect += 1.0
+				case energySprite:
+					if !yesLight {
+						yesLight = true
+						maxLight = 4.0
+					}
+					if energy < 100 {
+						energy += 1
+					}
+			}
+		}
+	}
+}
+
+func bulletMove(dt float64) {
+	for i, b := range world[levNow].obj[BUL] {
+		if b.touched {
+			continue
+		}
+		world[levNow].obj[BUL][i].pos = b.pos.Add(b.dir.Scaled(b.speed * dt));
+		for j, m := range world[levNow].obj[MON] {
+			if b.pos.Sub(m.pos).ReduceZ().Len() < 0.5 {
+				world[levNow].obj[MON][j].alive = false
+				world[levNow].obj[BUL][i].touched = true;
+				break
+			}
+		}
+		if world[levNow].block[int(b.pos.X)][int(b.pos.Y)][0] != 0 {
+			world[levNow].obj[BUL][i].touched = true;
+		}
+	}
+}
+
+
+
+// ===================== GAME RUN =====================
 
 func run() {
 	cfg := pixelgl.WindowConfig{
@@ -667,368 +771,380 @@ func run() {
 		panic(err)
 	}
 
-    win.SetCursorVisible(false)
+	win.SetCursorVisible(false)
 
-    for !win.Closed() {
-        switch mode {
-            case gameCase:
-                if gamePress(win) {
-                    return
-                }
-            case menuCase, pauseCase:
-                if menuPress(win) {
-                    return
-                }
-            case screamCase:
-                if screamPress(win) {
-                    return
-                }
-            case editorCase:
-                if editorPress(win) {
-                    return
-                }
-        }
-    }
+	for !win.Closed() {
+		switch mode {
+			case gameCase:
+				if gamePress(win) {
+					return
+				}
+			case menuCase, pauseCase:
+				if menuPress(win) {
+					return
+				}
+			case levelChoosingCase:
+				if levelChoosingPress(win) {
+					return
+				}
+			case screamCase:
+				if screamPress(win) {
+					return
+				}
+		}
+	}
 }
 
 func lenSpec(text string) (int) {
-    ret := 0
-    for _ = range text {
-        ret += 1
-    }
-    return ret
+	ret := 0
+	for _ = range text {
+		ret += 1
+	}
+	return ret
 }
 
 func drawPic(im *image.RGBA, x int, y int, imFrom *image.RGBA, scale float64) {
-    bounds := imFrom.Bounds()
-    emptyCol := imFrom.At(0, 0)
-    for i := 0; i < bounds.Max.X; i++ {
-        for j := 0; j < bounds.Max.Y; j++ {
-            colorTo := imFrom.At(i, j)
-            if colorTo != emptyCol {
-                im.Set(x + int(float64(i)*scale), y + int(float64(j)*scale), colorTo)
-            }
-        }
-    }
+	bounds := imFrom.Bounds()
+	emptyCol := imFrom.At(0, 0)
+	for i := 0; i < bounds.Max.X; i++ {
+		for j := 0; j < bounds.Max.Y; j++ {
+			colorTo := imFrom.At(i, j)
+			if colorTo != emptyCol {
+				im.Set(x + int(float64(i)*scale), y + int(float64(j)*scale), colorTo)
+			}
+		}
+	}
 }
 
 func drawPicIn(im *image.RGBA, x int, y int, x2 int, y2 int, imFrom *image.RGBA) {
-    bounds := imFrom.Bounds()
-    emptyCol := imFrom.At(0, 0)
-    w := x2 - x
-    h := y2 - y
-    bw := bounds.Max.X
-    bh := bounds.Max.Y
-    for i := 0; i < w; i++ {
-        for j := 0; j < h; j++ {
-            colorTo := imFrom.At(i*bw/w, j*bh/h)
-            if colorTo != emptyCol {
-                im.Set(x + i, y + j, colorTo)
-            }
-        }
-    }
+	bounds := imFrom.Bounds()
+	emptyCol := imFrom.At(0, 0)
+	w := x2 - x
+	h := y2 - y
+	bw := bounds.Max.X
+	bh := bounds.Max.Y
+	for i := 0; i < w; i++ {
+		for j := 0; j < h; j++ {
+			colorTo := imFrom.At(i*bw/w, j*bh/h)
+			if colorTo != emptyCol {
+				im.Set(x + i, y + j, colorTo)
+			}
+		}
+	}
 }
 
 func writeText(im *image.RGBA, text string, x int, y int, dir int, col color.Color, scale int) {
 	xStart := x
 	yStart := y
-    if dir == centerDir {
-        xStart = x - lenSpec(text)*(6*scale)/2
-        yStart = y - (4*scale)
-    }
-    ind := 0
-    for _, s := range text {
-        emptyCol := alpha[string(s)].At(4, 7)
-        for i := 0; i < (5*scale); i++ {
-            for j := 0; j < (8*scale); j++ {
-                colorTo := alpha[string(s)].At(i/scale, j/scale)
-                if colorTo != emptyCol {
-                    im.Set(xStart + ind * ((5 + 1)*scale) + i, yStart + j, col)
-                }
-            }
-        }
-        ind += 1
-    }
-}
-
-func is(a int, b int) (int) {
-    if a == b {
-        return 1
-    }
-    return 0
-}
-
-func isnt(a int, b int) (int) {
-    if a != b {
-        return 1
-    }
-    return 0
-}
-
-func editorPress(win *pixelgl.Window) (bool) {
-    startMouse := pixel.V(float64(width)/2, float64(height)/2)
-    win.SetMousePosition(startMouse)
-
-    getL, err := ioutil.ReadFile("lev/level01.txt")
-    if err != nil {
-        fmt.Println(err.Error())
-        mode = menuCase
-        return false
-    }
-    l := strings.Replace(strings.Replace(string(getL), "\n", "", -1), "\t", "", -1)
-
-    wh := strings.Split(l, "?")
-    widthPlan, _ := strconv.Atoi(wh[0])
-    heightPlan, _ := strconv.Atoi(wh[1])
-    pars := strings.Split(wh[2], "|")
-    levelPlan := [][]int{}
-    for i := range pars {
-        elems := strings.Split(pars[i], " ")
-        levelPlan = append(levelPlan, []int{})
-        for j := 0; j < heightPlan; j++ {
-            elem, _ := strconv.Atoi(elems[j])
-            levelPlan[i] = append(levelPlan[i], elem)
-        }
-    }
-
-    for !win.Closed() && mode == editorCase {
-        if win.JustPressed(pixelgl.KeyEscape) {
-			mode = menuCase
+	if dir == centerDir {
+		xStart = x - lenSpec(text)*(6*scale)/2
+		yStart = y - (4*scale)
+	}
+	ind := 0
+	for _, s := range text {
+		emptyCol := alpha[string(s)].At(4, 7)
+		for i := 0; i < (5*scale); i++ {
+			for j := 0; j < (8*scale); j++ {
+				colorTo := alpha[string(s)].At(i/scale, j/scale)
+				if colorTo != emptyCol {
+					im.Set(xStart + ind * ((5 + 1)*scale) + i, yStart + j, col)
+				}
+			}
 		}
-
-		win.Clear(color.Black)
-
-	    im := image.NewRGBA(image.Rect(0, 0, width, height))
-        //bx := imFrom.Bounds().Max.X
-        //by := imFrom.Bounds().Max.Y
-
-        drawPicIn(im, 20, 2, 38, 20, floor[0])
-        drawPicIn(im, 40, 2, 58, 20, floor[-1])
-        drawPicIn(im, 60, 2, 78, 20, bonusInfo[0].pic[0])
-        drawPicIn(im, 80, 2, 98, 20, bonusInfo[1].pic[0])
-        drawPicIn(im, 100, 2, 118, 20, mon[0].pic)
-        drawPicIn(im, 120, 2, 138, 20, mon[1].pic)
-        drawPicIn(im, 140, 2, 158, 20, wallTexture[1])
-        drawPicIn(im, 160, 2, 178, 20, wallTexture[2])
-        drawPicIn(im, 180, 2, 198, 20, wallTexture[3])
-
-        starti, startj := 0, 25
-        sc := 20
-        for i := 0; i < widthPlan; i++ {
-            for j := 0; j < heightPlan; j++ {
-                drawPicIn(im, starti + i*sc, startj + j*sc,
-                    starti + (i+1)*sc, startj + (j+1)*sc, retBlock[levelPlan[i][j]])
-            }
-        }
-
-		p := pixel.PictureDataFromImage(im)
-
-	    c := win.Bounds().Center()
-		pixel.NewSprite(p, p.Bounds()).Draw(win, pixel.IM.Moved(c).Scaled(c, scale))
-
-        win.Update()
-    }
-
-    return false
+		ind += 1
+	}
 }
 
 func screamPress(win *pixelgl.Window) (bool) {
-    startMouse := pixel.V(float64(width)/2, float64(height)/2)
-    win.SetMousePosition(startMouse)
-    timer := 0
+	startMouse := pixel.V(float64(width)/2, float64(height)/2)
+	win.SetMousePosition(startMouse)
+	timer := 0
 
-    for !win.Closed() && mode == screamCase {
+	for !win.Closed() && mode == screamCase {
 		win.Clear(color.Black)
+		
+		// add NORMAL delay!
+		timer += 1
+		if timer > 50 {
+			if die {
+				mode = menuCase
+			} else {
+				mode = gameCase
+			}
+		}
 
-        timer += 1
-        if timer > 50 {
-            mode = gameCase
-        }
+		im := image.NewRGBA(image.Rect(0, 0, width, height))
+		imFrom := about[monWhoKilled].screamer
+		bx := imFrom.Bounds().Max.X
+		by := imFrom.Bounds().Max.Y
 
-	    im := image.NewRGBA(image.Rect(0, 0, width, height))
-        imFrom := forms[monWhoKilled].screamer
-        bx := imFrom.Bounds().Max.X
-        by := imFrom.Bounds().Max.Y
-
-        for i := 0; i < width; i++ {
-            for j := 0; j < height; j++ {
-                im.Set(i, j, imFrom.At(i * bx / width, j * by / height))
-            }
-        }
+		for i := 0; i < width; i++ {
+			for j := 0; j < height; j++ {
+				im.Set(i, j, imFrom.At(i * bx / width, j * by / height))
+			}
+		}
 
 		p := pixel.PictureDataFromImage(im)
 
-	    c := win.Bounds().Center()
+		c := win.Bounds().Center()
 		pixel.NewSprite(p, p.Bounds()).Draw(win, pixel.IM.Moved(c).Scaled(c, scale))
 
-        win.Update()
-    }
+		win.Update()
+	}
 
-    return false
+	return false
+}
+
+func is(a int, b int) (int) {
+	if a == b {
+		return 1
+	}
+	return 0
+}
+
+func isnt(a int, b int) (int) {
+	if a != b {
+		return 1
+	}
+	return 0
 }
 
 func frameMenu(pointer int, graph int) *image.RGBA {
+	coefW := float64(width) / 320
+	//coefH := float64(height) / 200
 	im := image.NewRGBA(image.Rect(0, 0, width, height))
-    switch mode {
-        case menuCase:
-            writeText(im, "ИГРАТЬ", width/2, height/3, centerDir,
-                color.RGBA{50*uint8(isnt(pointer, 0)), uint8((150 + 3*graph)*is(pointer, 0)), 0, 255}, 2)
-        case pauseCase:
-            writeText(im, "ПРОДОЛЖИТЬ", width/2, height/3, centerDir,
-                color.RGBA{50*uint8(isnt(pointer, 0)), uint8((150 + 3*graph)*is(pointer, 0)), 0, 255}, 2)
-    }
-    writeText(im, "ПОМЕНЯТЬ ЧТО-ТО", width/2, height/2, centerDir,
-        color.RGBA{50*uint8(isnt(pointer, 1)), uint8((150 + 3*graph)*is(pointer, 1)), 0, 255}, 2)
-    writeText(im, "ВЫЙТИ ИЗ ИГРЫ", width/2, height*2/3, centerDir,
-        color.RGBA{50*uint8(isnt(pointer, 2)), uint8((150 + 3*graph)*is(pointer, 2)), 0, 255}, 2)
-    return im
+	switch mode {
+		case menuCase:
+			writeText(im, "ИГРАТЬ", width/2, height/3, centerDir,
+				color.RGBA{50*uint8(isnt(pointer, 0)), uint8((150 + 3*graph)*is(pointer, 0)), 0, 255}, int(2 * coefW))
+		case pauseCase:
+			writeText(im, "ПРОДОЛЖИТЬ", width/2, height/3, centerDir,
+				color.RGBA{50*uint8(isnt(pointer, 0)), uint8((150 + 3*graph)*is(pointer, 0)), 0, 255}, int(2 * coefW))
+	}
+	writeText(im, "ВЫБРАТЬ УРОВЕНЬ", width/2, height/2, centerDir,
+		color.RGBA{50*uint8(isnt(pointer, 1)), uint8((150 + 3*graph)*is(pointer, 1)), 0, 255}, int(2 * coefW))
+	writeText(im, "ВЫЙТИ ИЗ ИГРЫ", width/2, height*2/3, centerDir,
+		color.RGBA{50*uint8(isnt(pointer, 2)), uint8((150 + 3*graph)*is(pointer, 2)), 0, 255}, int(2 * coefW))
+	return im
 }
 
 func menuPress(win *pixelgl.Window) (bool) {
-    startMouse := pixel.V(float64(width)/2, float64(height)/2)
-    win.SetMousePosition(startMouse)
+	startMouse := pixel.V(float64(width)/2, float64(height)/2)
+	win.SetMousePosition(startMouse)
 
-    pointer := 0
-    graph := 0
-    pressUpTime := 0
-    pressDownTime := 0
+	pointer := 0
+	graph := 0
+	pressUpTime := 0
+	pressDownTime := 0
 
-    for !win.Closed() && (mode == menuCase || mode == pauseCase) {
-        if win.JustPressed(pixelgl.KeyEscape) || win.JustPressed(pixelgl.KeyQ) {
+	for !win.Closed() && (mode == menuCase || mode == pauseCase) {
+		if win.JustPressed(pixelgl.KeyEscape) || win.JustPressed(pixelgl.KeyQ) {
 			return true
 		}
 
 		win.Clear(color.Black)
-        graph = (graph + 1) % 30
+		graph = (graph + 1) % 30
 
-        if win.Pressed(pixelgl.KeyUp) || win.Pressed(pixelgl.KeyW) {
+		if win.Pressed(pixelgl.KeyUp) || win.Pressed(pixelgl.KeyW) {
 			if pressUpTime == 0 {
-                pointer = (pointer - 1 + 2) % 3
-            }
-            pressUpTime = (pressUpTime + 1) % 20
+				pointer = (pointer + 2) % 3
+			}
+			pressUpTime = (pressUpTime + 1) % 20
 		} else {
-            pressUpTime = 0
-        }
+			pressUpTime = 0
+		}
 
 		if win.Pressed(pixelgl.KeyDown) || win.Pressed(pixelgl.KeyS) {
 			if pressDownTime == 0 {
-			    pointer = (pointer + 1) % 3
-            }
-            pressDownTime = (pressDownTime + 1) % 20
+				pointer = (pointer + 1) % 3
+			}
+			pressDownTime = (pressDownTime + 1) % 20
 		} else {
-            pressDownTime = 0
-        }
+			pressDownTime = 0
+		}
 
-        if win.Pressed(pixelgl.KeyEnter) || win.Pressed(pixelgl.KeySpace) {
+		if win.JustPressed(pixelgl.KeyEnter) || win.JustPressed(pixelgl.KeySpace) {
 			switch pointer {
-                case 0:
-                    mode = gameCase
-                case 1:
-                    mode = editorCase
-                case 2:
-                    return true
-            }
+				case 0:
+					if mode == menuCase {
+						reset(0)
+						levNow = 0
+					}
+					mode = gameCase
+				case 1:
+					mode = levelChoosingCase
+				case 2:
+					return true
+			}
 		}
 
 		p := pixel.PictureDataFromImage(frameMenu(pointer, graph))
 
-	    c := win.Bounds().Center()
+		c := win.Bounds().Center()
 		pixel.NewSprite(p, p.Bounds()).Draw(win, pixel.IM.Moved(c).Scaled(c, scale))
 
-        win.Update()
-    }
+		win.Update()
+	}
 
-    return false
+	return false
+}
+
+func frameLevelMenu(pointer int, graph int) *image.RGBA {
+	coefW := float64(width) / 320
+	im := image.NewRGBA(image.Rect(0, 0, width, height))
+	writeText(im, "УРОВЕНЬ 1", width/2, height/3, centerDir,
+		color.RGBA{50*uint8(isnt(pointer, 0)), uint8((150 + 3*graph)*is(pointer, 0)), 0, 255}, int(2 * coefW))
+	writeText(im, "УРОВЕНЬ 2", width/2, height/2, centerDir,
+		color.RGBA{50*uint8(isnt(pointer, 1)), uint8((150 + 3*graph)*is(pointer, 1)), 0, 255}, int(2 * coefW))
+	writeText(im, "НАЗАД", width/2, height*2/3, centerDir,
+		color.RGBA{50*uint8(isnt(pointer, 2)), uint8((150 + 3*graph)*is(pointer, 2)), 0, 255}, int(2 * coefW))
+	return im
+}
+
+func levelChoosingPress(win *pixelgl.Window) (bool) {
+	startMouse := pixel.V(float64(width)/2, float64(height)/2)
+	win.SetMousePosition(startMouse)
+
+	pointer := 0
+	graph := 0
+	pressUpTime := 0
+	pressDownTime := 0
+
+	for !win.Closed() && mode == levelChoosingCase {
+		if win.JustPressed(pixelgl.KeyEscape) || win.JustPressed(pixelgl.KeyQ) {
+			return true
+		}
+
+		win.Clear(color.Black)
+		graph = (graph + 1) % 30
+
+		if win.Pressed(pixelgl.KeyUp) || win.Pressed(pixelgl.KeyW) {
+			if pressUpTime == 0 {
+				pointer = (pointer + 2) % 3
+			}
+			pressUpTime = (pressUpTime + 1) % 20
+		} else {
+			pressUpTime = 0
+		}
+
+		if win.Pressed(pixelgl.KeyDown) || win.Pressed(pixelgl.KeyS) {
+			if pressDownTime == 0 {
+				pointer = (pointer + 1) % 3
+			}
+			pressDownTime = (pressDownTime + 1) % 20
+		} else {
+			pressDownTime = 0
+		}
+
+		if win.JustPressed(pixelgl.KeyEnter) || win.JustPressed(pixelgl.KeySpace) {
+			switch pointer {
+				case 0:
+					reset(pointer)
+					levNow = pointer
+					mode = gameCase
+				case 1:
+					reset(pointer)
+					levNow = pointer
+					mode = gameCase
+				case 2:
+					mode = menuCase
+			}
+		}
+
+		p := pixel.PictureDataFromImage(frameLevelMenu(pointer, graph))
+
+		c := win.Bounds().Center()
+		pixel.NewSprite(p, p.Bounds()).Draw(win, pixel.IM.Moved(c).Scaled(c, scale))
+
+		win.Update()
+	}
+
+	return false
 }
 
 func gamePress(win *pixelgl.Window) (bool) {
-	c := win.Bounds().Center()
 	last := time.Now()
-	mapRot := -1.6683362599999894
 
-    startMouse := pixel.V(float64(width)/2, float64(height)/2)
-    win.SetMousePosition(startMouse)
+	startMouse := pixel.V(float64(width)/2, float64(height)/2)
+	win.SetMousePosition(startMouse)
+	
+	pressShootTime := 0
 
 	for !win.Closed() && mode == gameCase {
-        if die && lives > 0 {
-            mode = screamCase
-            die = false
-            pos = posStart
-            yesLight = true
-            energy = 100
-            energyUnit = 0.1
-            maxLight = 4.0
-            forceLight = 1.0
-        }
+		dt := time.Since(last).Seconds()
+		//log.Println(dt)
+		last = time.Now()
+		if die && lives > 0 {
+			mode = screamCase
+			die = false
+			pos = world[levNow].posStart
+			yesLight = true
+			energy = 100
+			energyUnit = 0.1
+			maxLight = 4.0
+			forceLight = 1.0
+		}
 
-        if win.JustPressed(pixelgl.KeyEscape) || win.JustPressed(pixelgl.KeyP) {
+		if win.JustPressed(pixelgl.KeyEscape) || win.JustPressed(pixelgl.KeyP) {
 			mode = pauseCase
 		}
 
-        if appleEffect > 1.01 {
-            appleEffect -= 0.2
-        }
-        if livesEffect > 1.01 {
-            livesEffect -= 0.2
-        }
+		if appleEffect > 1.01 {
+			appleEffect -= 0.2
+		}
+		if livesEffect > 1.01 {
+			livesEffect -= 0.2
+		}
+		
+		// Jumping physics
+		pos.Z += myUpSpeed * dt
+		if pos.Z - myHeightStart > 0.001 &&
+			world[levNow].block[int(pos.X)][int(pos.Y)][int(pos.Z - myHeightStart - 0.001)] <= 0 {
+			myUpSpeed -= G * dt // in the air
+			if pos.Z > float64(world[levNow].floorsHere) - 0.1 ||
+				world[levNow].block[int(pos.X)][int(pos.Y)][int(pos.Z + 0.1)] > 0 {
+				pos.Z -= (myUpSpeed * dt * 2)
+				myUpSpeed = -myUpSpeed // touched ceiling
+			}
+		} else {
+			pos.Z = float64(int(pos.Z)) + myHeightStart // touched ground
+			myUpSpeed = 0
+			onGround = true
+		}
 
-        if die && lives == 0 {
-            mode = screamCase
-            die = false
-            pos = posStart
-            yesLight = true
-            energy = 100
-            energyUnit = 0.1
-            maxLight = 4.0
-            forceLight = 1.0
-            for i, m := range mon {
-                mon[i].X = m.XStart
-                mon[i].Y = m.YStart
-                mon[i].live = forms[mon[i].form].liveMax
-                mon[i].alive = true
-            }
-            bonusCount = 0
-            for i := range bon {
-                bon[i].taken = false
-            }
-            lives = livesStart
-			mode = menuCase
-        }
+		if die && lives == 0 {
+			die = false
+			mode = screamCase
+		}
 
-        if yesLight {
-            energyUnit -= maxLight * forceLight * 0.01
-            if energyUnit < 0 {
-                energyUnit = 1
-                if energy > 0 {
-                    energy -= 1
-                } else {
-                    yesLight = false
-                }
-            }
-        } else {
-            maxLight = 0
-        }
+		if yesLight {
+			energyUnit -= maxLight * forceLight * 0.01
+			if energyUnit < 0 {
+				energyUnit = 1
+				if energy > 0 {
+					energy -= 1
+				} else {
+					yesLight = false
+				}
+			}
+		} else {
+			maxLight = 0
+		}
 
-        bonusInfo[appleBonusForm].graph = (bonusInfo[appleBonusForm].graph + 1) %
-            bonusInfo[appleBonusForm].graphs
-        bonusInfo[livesBonusForm].graph = (bonusInfo[livesBonusForm].graph + 1) %
-            bonusInfo[livesBonusForm].graphs
-        bonusInfo[energyBonusForm].graph = (bonusInfo[energyBonusForm].graph + 1) %
-            bonusInfo[energyBonusForm].graphs
+		spriteInfo[appleSprite].graph = (spriteInfo[appleSprite].graph + 1) %
+			spriteInfo[appleSprite].graphs
 
 		win.Clear(color.Black)
 
-		dt := time.Since(last).Seconds()
-		last = time.Now()
-
 		as = getActionSquare()
 
-        monsterMove()
-        bonusMove()
+		monsterMove(dt)
+		bonusMove(dt)
+		bulletMove(dt)
 
-        newMousePosition := win.MousePosition()
-        diffMouse := newMousePosition.Sub(startMouse).X
-        win.SetMousePosition(startMouse)
+		newMousePosition := win.MousePosition()
+		diffMouse := newMousePosition.Sub(startMouse).X
+		win.SetMousePosition(startMouse)
 
 		if win.Pressed(pixelgl.KeyUp) || win.Pressed(pixelgl.KeyW) {
 			moveForward(mySpeed * dt)
@@ -1053,89 +1169,106 @@ func gamePress(win *pixelgl.Window) (bool) {
 		if win.Pressed(pixelgl.KeyI) || diffMouse < -0.01 {
 			turnLeft(-0.2 * dt * diffMouse)
 		}
+		
+		if win.Pressed(pixelgl.KeySpace) && onGround {
+			onGround = false
+			myUpSpeed += 8.0
+		}
 
-        if yesLight {
-            if win.Pressed(pixelgl.KeyKPSubtract) {
-			    if maxLight > 4.01 {
-			        maxLight -= 0.1
-                }
-		    }
-            if win.Pressed(pixelgl.KeyKPAdd) {
-			    if maxLight < 9.99 {
-                    maxLight += 0.1
-                }
-		    }
-            if forceLight > 1.01 {
-                forceLight -= 0.1
-            }
-            if win.Pressed(pixelgl.MouseButtonLeft) {
-			    if forceLight < 4.99 {
-                    forceLight += 0.3
-                }
-		    }
-        }
+		if yesLight {
+			/*if win.Pressed(pixelgl.KeyKPSubtract) {
+				if maxLight > 4.01 {
+					maxLight -= 0.1
+				}
+			}
+			if win.Pressed(pixelgl.KeyKPAdd) {
+				if maxLight < 9.99 {
+					maxLight += 0.1
+				}
+			}*/
+			if win.Pressed(pixelgl.MouseButtonLeft) {
+				if forceLight < 1.99 {
+					forceLight += 0.3
+				}
+				if maxLight < 10.99 {
+					maxLight += 0.3
+				}
+			} else {
+				if forceLight > 1.01 {
+					forceLight -= 0.1
+				}
+				if maxLight > 4.01 {
+					maxLight -= 0.1
+				}
+			}
+		}
 
 		if win.JustPressed(pixelgl.KeyM) {
 			showMap = !showMap
 		}
 
-		if win.JustPressed(pixelgl.KeySpace) {
+		if win.JustPressed(pixelgl.KeyB) {
 			as.toggle(3)
 		}
-
-		p := pixel.PictureDataFromImage(frameGame())
-
-		pixel.NewSprite(p, p.Bounds()).Draw(win, pixel.IM.Moved(c).Scaled(c, scale))
-
-		if showMap {
-			m := pixel.PictureDataFromImage(minimap())
-
-			mc := m.Bounds().Min.Add(pixel.V(-m.Rect.W(), m.Rect.H()))
-
-			pixel.NewSprite(m, m.Bounds()).
-				Draw(win, pixel.IM.
-					Moved(mc).
-					Rotated(mc, mapRot).
-					ScaledXY(pixel.ZV, pixel.V(-scale*2, scale*2)))
+		
+		if win.Pressed(pixelgl.MouseButtonRight) {
+			if pressShootTime == 0 && bonusCount > 0 {
+				bonusCount -= 1
+				shoot();
+			}
+			pressShootTime = (pressShootTime + 1) % 5
+		} else {
+			pressShootTime = 0
 		}
+		
+		po := time.Now()
+		frameGame(win)
+		dd := time.Since(po).Seconds()
+		log.Println("Full render time: ", dd)
+	}
+	return false
+}
 
-		win.Update()
-    }
-    return false
+
+
+// ===================== BUTTON ACTIONS =====================
+
+func shoot() {
+	world[levNow].obj[BUL] = append(world[levNow].obj[BUL], Obj{pos: pos, dir: dir, touched: false, width: 0.1, height: 0.1, speed: 6.0})
 }
 
 func moveForward(s float64) {
-	if world[levNow][int(pos.X+dir.X*(s+myWallDist))][int(pos.Y)] <= 0 {
+	if world[levNow].block[int(pos.X+dir.X*(s+myWallDist))][int(pos.Y)][int(pos.Z - myHeightStart)] <= 0 {
 		pos.X += dir.X * s
 	}
-	if world[levNow][int(pos.X)][int(pos.Y+dir.Y*(s+myWallDist))] <= 0 {
+	if world[levNow].block[int(pos.X)][int(pos.Y+dir.Y*(s+myWallDist))][int(pos.Z - myHeightStart)] <= 0 {
 		pos.Y += dir.Y * s
 	}
 }
 
 func moveLeft(s float64) {
-	if world[levNow][int(pos.X-plane.X*(s+myWallDist))][int(pos.Y)] <= 0 {
+	if world[levNow].block[int(pos.X-plane.X*(s+myWallDist))][int(pos.Y)][int(pos.Z - myHeightStart)] <= 0 {
 		pos.X -= plane.X * s
 	}
-	if world[levNow][int(pos.X)][int(pos.Y-plane.Y*(s+myWallDist))] <= 0 {
+	if world[levNow].block[int(pos.X)][int(pos.Y-plane.Y*(s+myWallDist))][int(pos.Z - myHeightStart)] <= 0 {
 		pos.Y -= plane.Y * s
 	}
 }
 
 func moveBackwards(s float64) {
-	if world[levNow][int(pos.X-dir.X*(s+myWallDist))][int(pos.Y)] <= 0 {
+	if world[levNow].block[int(pos.X-dir.X*(s+myWallDist))][int(pos.Y)][int(pos.Z - myHeightStart)] <= 0 {
 		pos.X -= dir.X * s
 	}
-	if world[levNow][int(pos.X)][int(pos.Y-dir.Y*(s+myWallDist))] <= 0 {
+	if world[levNow].block[int(pos.X)][int(pos.Y-dir.Y*(s+myWallDist))][int(pos.Z - myHeightStart)] <= 0 {
 		pos.Y -= dir.Y * s
 	}
 }
 
 func moveRight(s float64) {
-	if world[levNow][int(pos.X+plane.X*(s+myWallDist))][int(pos.Y)] <= 0 {
+	if world[levNow].block[int(pos.X+plane.X*(s+myWallDist))][int(pos.Y)][int(pos.Z - myHeightStart)] <= 0 {
 		pos.X += plane.X * s
 	}
-	if world[levNow][int(pos.X)][int(pos.Y+plane.Y*(s+myWallDist))] <= 0 {
+	if world[levNow].block[int(pos.X)][int(pos.Y+plane.Y*(s+myWallDist))][int(pos.Z - myHeightStart)] <= 0 {
 		pos.Y += plane.Y * s
 	}
 }
@@ -1144,140 +1277,232 @@ func turnRight(s float64) {
 	oldDirX := dir.X
 	dir.X = dir.X*math.Cos(-s) - dir.Y*math.Sin(-s)
 	dir.Y = oldDirX*math.Sin(-s) + dir.Y*math.Cos(-s)
-
-	oldPlaneX := plane.X
-	plane.X = plane.X*math.Cos(-s) - plane.Y*math.Sin(-s)
-	plane.Y = oldPlaneX*math.Sin(-s) + plane.Y*math.Cos(-s)
+	plane = dir.Rotated(-math.Pi / 2);
 }
 
 func turnLeft(s float64) {
 	oldDirX := dir.X
 	dir.X = dir.X*math.Cos(s) - dir.Y*math.Sin(s)
 	dir.Y = oldDirX*math.Sin(s) + dir.Y*math.Cos(s)
-
-	oldPlaneX := plane.X
-	plane.X = plane.X*math.Cos(s) - plane.Y*math.Sin(s)
-	plane.Y = oldPlaneX*math.Sin(s) + plane.Y*math.Cos(s)
+	plane = dir.Rotated(-math.Pi / 2);
 }
 
-func getPic(path string) (*image.RGBA) {
-    file, err := os.Open(path)
-    if err != nil {
-        fmt.Println(err.Error())
-        return image.NewRGBA(image.Rect(0, 0, 1, 1))
-    }
-    defer file.Close()
-    pic, _, err := image.Decode(file)
-    if err != nil {
-        fmt.Println(err.Error())
-        return image.NewRGBA(image.Rect(0, 0, 1, 1))
-    }
-    bounds := pic.Bounds()
+
+
+// ===================== READ INFO =====================
+
+func getPic(path string) (bool, *image.RGBA) {
+	file, err := os.Open(path)
+	if err != nil {
+		return true, image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	defer file.Close()
+	pic, _, err := image.Decode(file)
+	if err != nil {
+		fmt.Println(err.Error())
+		return true, image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	bounds := pic.Bounds()
 	to := image.NewRGBA(image.Rect(0, 0, bounds.Max.X, bounds.Max.Y))
-    for i := 0; i < bounds.Max.X; i++ {
-        for j := 0; j < bounds.Max.Y; j++ {
-            to.Set(i, j, pic.At(i, j))
-        }
-    }
-    return to
+	for i := 0; i < bounds.Max.X; i++ {
+		for j := 0; j < bounds.Max.Y; j++ {
+			to.Set(i, j, pic.At(i, j))
+		}
+	}
+	return false, to
 }
 
-func getBonus(form int, spritesAmount int, path string, show bool) {
-    bonusInfo[form] = &BonusForm{}
-    a := getPic(path)
-    bounds := a.Bounds()
-    bh := bounds.Max.Y
-    bw := bounds.Max.X / spritesAmount
-    bonusInfo[form].bonusH = bh
-    bonusInfo[form].bonusW = bw
-    bonusInfo[form].graphs = spritesAmount
-    bonusInfo[form].graph = 0
-    bonusInfo[form].show = show
-    bonusInfo[form].pic = [](*image.RGBA){}
-    for k := 0; k < spritesAmount; k++ {
-        bonusInfo[form].pic = append(bonusInfo[form].pic,
-            image.NewRGBA(image.Rect(0, 0, bw, bh)))
-        for i := 0; i < bw; i++ {
-            for j := 0; j < bh; j++ {
-                bonusInfo[form].pic[k].Set(i, j, a.At(k*bw + i, j))
-            }
-        }
-    }
+func getBonus(form int, spritesAmount int, path string, show bool) int {
+	spriteInfo[form] = &Sprite{}
+	picErr, a := getPic(path)
+	if picErr {
+		return 1
+	}
+	bounds := a.Bounds()
+	bh := bounds.Max.Y
+	bw := bounds.Max.X / spritesAmount
+	spriteInfo[form].spriteHeight = bh
+	spriteInfo[form].spriteWidth = bw
+	spriteInfo[form].graphs = spritesAmount
+	spriteInfo[form].graph = 0
+	spriteInfo[form].show = show
+	spriteInfo[form].pic = [](*image.RGBA){}
+	for k := 0; k < spritesAmount; k++ {
+		spriteInfo[form].pic = append(spriteInfo[form].pic,
+			image.NewRGBA(image.Rect(0, 0, bw, bh)))
+		for i := 0; i < bw; i++ {
+			for j := 0; j < bh; j++ {
+				spriteInfo[form].pic[k].Set(i, j, a.At(k*bw + i, j))
+			}
+		}
+	}
+	return 0
 }
 
-func getAlpha(w int, h int) (map[string](*image.RGBA)) {
-    res := map[string](*image.RGBA){}
-    a := getPic("tex/alpha.png")
-    allStr := []string{
-        "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        ".,\"-()[]!?_ :;/\\$*#%+|=",
-        "0123456789",
-    }
-    for iInd, iGird := range allStr {
-        jInd := 0
-        for _, jGird := range iGird {
-            res[string(jGird)] = image.NewRGBA(image.Rect(0, 0, w, h))
-            for i := 0; i < w; i++ {
-                for j := 0; j < h; j++ {
-                    res[string(jGird)].Set(i, j, a.At(jInd * w + i, iInd * h + j))
-                }
-            }
-            jInd += 1
-        }
-    }
-    return res
+func getAlpha(w int, h int) (int, map[string](*image.RGBA)) {
+	res := map[string](*image.RGBA){}
+	picErr, a := getPic("tex/alpha.png")
+	if picErr {
+		return 1, nil
+	}
+	allStr := []string{
+		"АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+		".,\"-()[]!?_ :;/\\$*#%+|=",
+		"0123456789",
+	}
+	for iInd, iGird := range allStr {
+		jInd := 0
+		for _, jGird := range iGird {
+			res[string(jGird)] = image.NewRGBA(image.Rect(0, 0, w, h))
+			for i := 0; i < w; i++ {
+				for j := 0; j < h; j++ {
+					res[string(jGird)].Set(i, j, a.At(jInd * w + i, iInd * h + j))
+				}
+			}
+			jInd += 1
+		}
+	}
+	return 0, res
+}
+
+func getLevel(path string) (*Level) {
+	lev := Level{}
+	lev.obj = append(lev.obj, []Obj{}, []Obj{}, []Obj{})
+	for fl := 0; true; fl++ {
+		picErr, levPic := getPic(path + "-" + strconv.Itoa(fl) + ".png")
+		//log.Println(path + "-" + strconv.Itoa(fl) + ".png")
+		if picErr {
+			lev.floorsHere = fl
+			break
+		}
+		bounds := levPic.Bounds()
+		for i := 0; i < bounds.Max.X; i++ {
+			for k := 2; k < bounds.Max.Y; k++ {
+				j := bounds.Max.Y + 1 - k
+				colorTo := levPic.At(i, k)
+				lev.block[i][j-2][fl] = 0
+				switch colorTo {
+					case levPic.At(1, 0):
+						lev.block[i][j-2][fl] = wall0Block
+					case levPic.At(2, 0):
+						lev.posStart = V3(float64(i)+0.5, float64(j)+0.5-2, myHeight)
+					case levPic.At(3, 0):
+						lev.obj[BON] = append(lev.obj[BON], Obj{pos: V3(float64(i)+0.5, float64(j)+0.5-2, float64(fl)+0.5),
+							taken: false, form: energySprite})
+						lev.block[i][j-2][fl] = energyBlock
+					case levPic.At(4, 0):
+						lev.obj[BON] = append(lev.obj[BON], Obj{pos: V3(float64(i)+0.5, float64(j)+0.5-2, float64(fl)+0.5),
+							taken: false, form: livesSprite, width: 0.2, height: 0.2})
+					case levPic.At(5, 0):
+						lev.obj[BON] = append(lev.obj[BON], Obj{pos: V3(float64(i)+0.5, float64(j)+0.5-2, float64(fl)+0.5),
+							taken: false, form: appleSprite, width: 0.2, height: 0.2, speed: 0.3})
+					case levPic.At(6, 0):
+						lev.block[i][j-2][fl] = wall2Block
+					case levPic.At(7, 0):
+						lev.block[i][j-2][fl] = wall3Block
+					case levPic.At(8, 0):
+						lev.block[i][j-2][fl] = wall4Block
+					case levPic.At(9, 0):
+						lev.block[i][j-2][fl] = wall5Block
+					case levPic.At(0, 1):
+						lev.obj[MON] = append(lev.obj[MON], Obj{posStart: V3(float64(i)+0.5, float64(j)+0.5-2, float64(fl)+0.4),
+							width: 0.4, height: 0.4, form: zombieSprite, about: 0})
+					case levPic.At(1, 1):
+						lev.obj[MON] = append(lev.obj[MON], Obj{posStart: V3(float64(i)+0.5, float64(j)+0.5-2, float64(fl)+0.4),
+							width: 0.4, height: 0.4, form: momoSprite, about: 1})
+				}
+			}
+		}
+	}
+	return &lev
+}
+
+func reset(lev int) {
+	pos = world[lev].posStart
+	dir = V3(-1.0, 0.0, 0.0)
+	plane = V3(0.0, 1.0, 0.0)
+	yesLight = true
+	energy = 100
+	energyUnit = 0.1
+	maxLight = 4.0
+	forceLight = 1.0
+	for i, m := range world[lev].obj[MON] {
+		world[lev].obj[MON][i].pos = m.posStart
+		world[lev].obj[MON][i].live = about[m.about].liveMax
+		world[lev].obj[MON][i].alive = true
+	}
+	bonusCount = 0
+	for i := range world[lev].obj[BON] {
+		world[lev].obj[BON][i].taken = false
+	}
+	lives = livesStart
 }
 
 func main() {
-	flag.BoolVar(&fullscreen, "f", fullscreen, "fullscreen")
-	flag.IntVar(&width, "w", width, "width")
-	flag.IntVar(&height, "h", height, "height")
-	flag.Float64Var(&scale, "s", scale, "scale")
-	flag.Parse()
+	for true {
+		lev := getLevel("lev/level0" + strconv.Itoa(amountOfLevels + 1))
+		if lev.floorsHere == 0 {
+			if amountOfLevels == 0 {
+				log.Println("Error: no level files.")
+				return
+			}
+			break
+		}
+		world = append(world, lev)
+		amountOfLevels++
+	}
 
-	setup()
+	picErr := true
+	pic := image.NewRGBA(image.Rect(0, 0, 1, 1))
 
-    world = append(world, getLevel("lev/level01.png"))
+	for _, m := range world[0].obj[MON] { // correct 0
+		picErr, pic = getPic("tex/screamer" + strconv.Itoa(m.about) + ".png")
+		if picErr {
+			return
+		}
+		about[m.about].screamer = pic
+	}
 
-    for i, m := range mon {
-        mon[i].pic = getPic("tex/mon" + strconv.Itoa(m.form) + ".png")
-        forms[mon[i].form].screamer = getPic("tex/screamer" + strconv.Itoa(m.form) + ".png")
-        mon[i].X = m.XStart
-        mon[i].Y = m.YStart
-        mon[i].alive = true
-        mon[i].live = forms[mon[i].form].liveMax
-    }
+	for i := 0; true; i++ {
+		picErr, pic = getPic("tex/wall" + strconv.Itoa(i) + ".png")
+		if picErr {
+			break
+		}
+		wallTexture = append(wallTexture, pic)
+	}
 
-    for i := 0; i < wallsAmount; i++ {
-        wallTexture[i] = getPic("tex/wall" + strconv.Itoa(i) + ".png")
-    }
+	floor = map[int](*image.RGBA){}
+	picErr, pic = getPic("tex/floor0.png")
+	if picErr {
+		log.Println("Error: no floor files.")
+		return
+	}
+	floor[0] = pic
+	picErr, pic = getPic("tex/floor1.png")
+	if picErr {
+		log.Println("Error: no floor files.")
+		return
+	}
+	floor[-1] = pic
+	picErr, pic = getPic("tex/ceiling.png")
+	if picErr {
+		log.Println("Error: no ceiling file.")
+		return
+	}
+	ceiling = pic
+	
+	bonusErr := 0
+	bonusErr, alpha = getAlpha(5, 8)
+	bonusErr += getBonus(appleSprite, 34, "tex/bonus.png", true)
+	bonusErr += getBonus(energySprite, 1, "tex/energy.png", false)
+	bonusErr += getBonus(livesSprite, 1, "tex/lives.png", true)
+	bonusErr += getBonus(zombieSprite, 1, "tex/mon0.png", true)
+	bonusErr += getBonus(momoSprite, 1, "tex/mon1.png", true)
+	if bonusErr > 0 {
+		log.Println("Error: no bonus files.")
+		return
+	}
 
-    livesPic = getPic("tex/lives.png")
-    floor = map[int](*image.RGBA){}
-    floor[0] = getPic("tex/floor0.png")
-    floor[-1] = getPic("tex/floor1.png")
-    ceiling = getPic("tex/ceiling.png")
-
-    alpha = getAlpha(5, 8)
-    getBonus(appleBonusForm, 34, "tex/bonus.png", true)
-    getBonus(energyBonusForm, 1, "tex/energy.png", false)
-    getBonus(livesBonusForm, 1, "tex/lives.png", true)
-
-    retBlock[startBlock] = getPic("tex/start.png")
-    retBlock[wall0Block] = wallTexture[0]
-    retBlock[wall1Block] = wallTexture[1]
-    retBlock[wall2Block] = wallTexture[2]
-    retBlock[wall3Block] = wallTexture[3]
-    retBlock[wall4Block] = wallTexture[4]
-    retBlock[wall5Block] = wallTexture[5]
-    retBlock[mon0Block] = mon[0].pic
-    retBlock[mon1Block] = mon[1].pic
-    retBlock[appleBlock] = bonusInfo[0].pic[0]
-    retBlock[livesBlock] = bonusInfo[1].pic[0]
-    retBlock[emptyBlock] = floor[0]
-    retBlock[energyBlock] = floor[-1]
-
-    log.Println("Start!")
-    pixelgl.Run(run)
+	pixelgl.Run(run)
 }
