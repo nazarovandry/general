@@ -1,6 +1,3 @@
-// Online Go compiler to run Golang program online
-// Print "Hello World!" message
-
 package main
 import "fmt"
 
